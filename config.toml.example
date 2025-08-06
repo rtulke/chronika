@@ -1,0 +1,112 @@
+# Browser History Timeline Tool Configuration
+
+[browsers]
+# Enable/disable specific browsers
+chrome = true
+firefox = true
+safari = true        # macOS only
+brave = true         # Privacy-focused Chromium browser
+opera = true         # Opera browser
+edge = true          # Microsoft Edge (Chromium-based)
+vivaldi = true       # Vivaldi browser (Chromium-based)
+tor = true           # Tor Browser (Firefox-based)
+chromium = true      # Open source Chromium
+librewolf = true     # Privacy-focused Firefox fork
+
+[output]
+# Output format: "timeline", "json", "csv", "stats", "top-domains", "browser-usage", "patterns"
+# Advanced formats: "splunk", "elk", "gephi", "timeline-json"
+format = "timeline"
+
+# Maximum number of entries to retrieve
+limit = 100
+
+# Number of days back to search
+days_back = 7
+
+[display]
+# Show full URLs in timeline view
+show_url = true
+
+# Show visit count in timeline view
+show_visit_count = true
+
+# Date format for display
+date_format = "%Y-%m-%d %H:%M:%S"
+
+[filters]
+# Domain filtering (leave empty to include all)
+domain_whitelist = []  # Example: ["github.com", "stackoverflow.com"]
+domain_blacklist = []  # Example: ["ads.google.com", "facebook.com"]
+
+# Keyword search in titles and URLs (leave empty for no filtering)
+keywords = []  # Example: ["python", "security", "linux"]
+
+# Visit count filtering
+min_visit_count = 1
+max_visit_count = null  # null = no limit, or specify number like 100
+
+# Time range filtering (ISO format: YYYY-MM-DDTHH:MM:SS)
+time_from = null  # Example: "2025-06-01T00:00:00"
+time_to = null    # Example: "2025-06-07T23:59:59"
+
+# Use regex for domain and keyword filtering
+use_regex = false
+
+[analytics]
+# Enable statistical analysis
+enable_stats = true
+
+# Group browsing patterns by: "hour", "day", "weekday", "month"
+group_patterns_by = "hour"
+
+# Number of top domains to show in analysis
+top_domains_limit = 20
+
+# Include subdomains in domain analysis
+include_subdomains = true
+
+[exports]
+# Include metadata in exports (timestamps, source info)
+include_metadata = true
+
+# Anonymize URLs for privacy (replace paths with hashes)
+anonymize_urls = false
+
+# Compress output files
+compress_output = false
+
+# Include user agent information (if available)
+include_user_agent = false
+
+# Example configurations for different use cases:
+
+# Security Analysis Configuration:
+# [filters]
+# keywords = ["login", "admin", "password", "auth"]
+# min_visit_count = 1
+# [output]
+# format = "splunk"
+
+# Privacy-focused Analysis:
+# [exports]
+# anonymize_urls = true
+# include_metadata = false
+# [filters]
+# domain_blacklist = ["facebook.com", "google.com", "amazon.com"]
+
+# Developer Workflow Analysis:
+# [filters]
+# domain_whitelist = ["github.com", "stackoverflow.com", "docs.python.org"]
+# keywords = ["python", "git", "api"]
+# [output]
+# format = "stats"
+
+# Time-based Analysis:
+# [filters]
+# time_from = "2025-06-01T09:00:00"
+# time_to = "2025-06-01T17:00:00"
+# [analytics]
+# group_patterns_by = "hour"
+# [output]
+# format = "patterns"
