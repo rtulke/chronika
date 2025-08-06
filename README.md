@@ -1,4 +1,4 @@
-# Chronika - Forensic Browser History Timeline Tool
+# Chronika - Forensic Browser History and Timeline Tool
 
 A comprehensive tool for analyzing browser history across multiple browsers an platforms with advanced filtering, analytics, and export capabilities. Designed for digital forensics, security analysis, and privacy research.
 
