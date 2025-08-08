@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """
-Forensic Browser History and Timeline Tool
+Browser History Timeline Visualization Tool
 Reads browser history and displays it in chronological timeline format
-Author: Robert Tulke, rt@debian.sh
 """
 
 import sqlite3
 import json
 import csv
-import sys
 import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
 import argparse
 import toml
-from typing import List, Dict, Optional, Tuple, Set
+from typing import List, Dict, Optional
 from collections import Counter, defaultdict
 from urllib.parse import urlparse
-import xml.etree.ElementTree as ET
+
+import tempfile
+import shutil
+import gzip
 
 
 # Configuration defaults
@@ -107,6 +108,48 @@ def anonymize_url(url: str) -> str:
         return f"{parsed.scheme}://{domain}/path_{path_hash}"
     except:
         return "anonymized_url"
+
+
+# --- Helper functions for anonymization, metadata, temp DB copy ---
+def maybe_anonymize(url: str, config: Dict) -> str:
+    """Return anonymized URL if enabled in config."""
+    try:
+        if config.get("exports", {}).get("anonymize_urls"):
+            return anonymize_url(url)
+        return url
+    except Exception:
+        return url
+
+def write_metadata_sidecar(filename: str, config: Dict, count: int) -> None:
+    """Write a small sidecar JSON with export metadata if enabled."""
+    exports = config.get("exports", {})
+    if not exports.get("include_metadata", False):
+        return
+    meta = {
+        "generated_at": datetime.now().isoformat(),
+        "entries": count,
+        "anonymized": bool(exports.get("anonymize_urls")),
+        "compressed": bool(exports.get("compress_output")),
+        "tool": "chronika",
+        "version": 1
+    }
+    meta_path = f"{filename}.meta.json"
+    try:
+        with open(meta_path, "w") as mf:
+            json.dump(meta, mf, indent=2)
+    except Exception:
+        pass
+
+def copy_db_to_temp(db_path: Path, browser_name: str) -> Path:
+    """Copy a locked browser DB to a temp file and return the temp path."""
+    temp_dir = Path(tempfile.gettempdir())
+    temp_db = temp_dir / f"{browser_name.lower()}_history_{os.getpid()}.db"
+    try:
+        shutil.copy2(db_path, temp_db)
+    except Exception:
+        # Fallback to basic copy
+        shutil.copyfile(db_path, temp_db)
+    return temp_db
 
 
 def get_chrome_history_path() -> Optional[Path]:
@@ -311,10 +354,8 @@ def extract_chromium_based_history(db_path: Path, days_back: int, limit: int, br
     
     try:
         # Copy database to avoid locks
-        temp_db = f"/tmp/{browser_name.lower()}_history_{os.getpid()}.db"
-        os.system(f"cp '{db_path}' '{temp_db}'")
-        
-        conn = sqlite3.connect(temp_db)
+        temp_db = copy_db_to_temp(db_path, browser_name)
+        conn = sqlite3.connect(str(temp_db))
         cursor = conn.cursor()
         
         if debug:
@@ -366,13 +407,14 @@ def extract_chromium_based_history(db_path: Path, days_back: int, limit: int, br
                     "timestamp": visit_datetime,
                     "date_str": visit_datetime.strftime("%Y-%m-%d %H:%M:%S")
                 })
-        
         conn.close()
-        os.remove(temp_db)
-        
+        try:
+            if Path(temp_db).exists():
+                Path(temp_db).unlink()
+        except Exception:
+            pass
         if debug:
             print(f"   ✅ Successfully parsed {len(history_entries)} entries")
-        
     except Exception as e:
         if debug:
             print(f"❌ Error reading {browser_name} history: {e}")
@@ -403,10 +445,8 @@ def extract_firefox_based_history(db_path: Path, days_back: int, limit: int, bro
             print(f"   🕐 Firefox timestamp cutoff: {cutoff_firefox_time}")
     
     try:
-        temp_db = f"/tmp/{browser_name.lower()}_history_{os.getpid()}.db"
-        os.system(f"cp '{db_path}' '{temp_db}'")
-        
-        conn = sqlite3.connect(temp_db)
+        temp_db = copy_db_to_temp(db_path, browser_name)
+        conn = sqlite3.connect(str(temp_db))
         cursor = conn.cursor()
         
         if debug:
@@ -459,13 +499,14 @@ def extract_firefox_based_history(db_path: Path, days_back: int, limit: int, bro
                     "timestamp": visit_datetime,
                     "date_str": visit_datetime.strftime("%Y-%m-%d %H:%M:%S")
                 })
-        
         conn.close()
-        os.remove(temp_db)
-        
+        try:
+            if Path(temp_db).exists():
+                Path(temp_db).unlink()
+        except Exception:
+            pass
         if debug:
             print(f"   ✅ Successfully parsed {len(history_entries)} entries")
-        
     except Exception as e:
         if debug:
             print(f"❌ Error reading {browser_name} history: {e}")
@@ -489,10 +530,8 @@ def extract_safari_history(db_path: Path, days_back: int, limit: int, debug: boo
         print(f"   🕐 Safari timestamp cutoff: {cutoff_safari_time}")
     
     try:
-        temp_db = f"/tmp/safari_history_{os.getpid()}.db"
-        os.system(f"cp '{db_path}' '{temp_db}'")
-        
-        conn = sqlite3.connect(temp_db)
+        temp_db = copy_db_to_temp(db_path, "safari")
+        conn = sqlite3.connect(str(temp_db))
         cursor = conn.cursor()
         
         # Check which tables exist
@@ -601,7 +640,11 @@ def extract_safari_history(db_path: Path, days_back: int, limit: int, debug: boo
                     print(f"   ❌ Query failed: {e}")
         
         conn.close()
-        os.remove(temp_db)
+        try:
+            if Path(temp_db).exists():
+                Path(temp_db).unlink()
+        except Exception:
+            pass
         
     except Exception as e:
         if debug:
@@ -799,6 +842,20 @@ def collect_browser_history(config: Dict, debug: bool = False, search_all: bool 
     """Collect history from all enabled browsers"""
     all_history = []
     days_back = config["output"]["days_back"]
+
+    # If a specific time_from is set, ensure we fetch enough days to cover it
+    try:
+        filt = config.get("filters", {})
+        tf = filt.get("time_from")
+        if tf:
+            from_dt = datetime.fromisoformat(tf.replace('Z', '+00:00'))
+            delta_days = max(1, (datetime.now() - from_dt).days + 1)
+            if delta_days > days_back:
+                if debug:
+                    print(f"Extending days_back from {days_back} to {delta_days} based on time_from")
+                days_back = delta_days
+    except Exception:
+        pass
     
     # Determine how many entries to fetch from DB
     if search_all or no_time_filter:
@@ -1096,41 +1153,154 @@ def display_stats(stats: Dict) -> None:
             print(f"   {time_slot}: {count:,} visits")
 
 
-def export_json(history: List[Dict], filename: str = "browser_history.json") -> None:
-    """Export history to JSON"""
-    # Convert datetime objects to strings for JSON serialization
+
+def export_json(history: List[Dict], filename: str = "browser_history.json", config: Optional[Dict] = None) -> None:
+    """Export history to JSON (optionally anonymized/compressed)."""
+    config = config or {"exports": {}}
+    exports = config.get("exports", {})
     export_data = []
-    for entry in history.copy():
-        entry_copy = entry.copy()
-        entry_copy["timestamp"] = entry_copy["timestamp"].isoformat()
-        export_data.append(entry_copy)
-    
-    with open(filename, 'w') as f:
-        json.dump(export_data, f, indent=2)
-    print(f"History exported to {filename}")
+    for entry in history:
+        e = entry.copy()
+        e["timestamp"] = e["timestamp"].isoformat()
+        e["url"] = maybe_anonymize(e.get("url", ""), config)
+        export_data.append(e)
+    use_gzip = bool(exports.get("compress_output"))
+    out_path = filename if not use_gzip else (filename if filename.endswith(".gz") else f"{filename}.gz")
+    if use_gzip:
+        with gzip.open(out_path, 'wt', encoding='utf-8') as f:
+            json.dump(export_data, f, indent=2)
+    else:
+        with open(out_path, 'w') as f:
+            json.dump(export_data, f, indent=2)
+    print(f"History exported to {out_path}")
+    write_metadata_sidecar(filename, config, len(export_data))
 
 
-def export_csv(history: List[Dict], filename: str = "browser_history.csv") -> None:
-    """Export history to CSV"""
+def export_csv(history: List[Dict], filename: str = "browser_history.csv", config: Optional[Dict] = None) -> None:
+    """Export history to CSV (optionally anonymized/compressed)."""
     if not history:
         return
-    
+    config = config or {"exports": {}}
+    exports = config.get("exports", {})
     fieldnames = ["browser", "timestamp", "title", "url", "visit_count"]
-    
-    with open(filename, 'w', newline='') as f:
+    use_gzip = bool(exports.get("compress_output"))
+    out_path = filename if not use_gzip else (filename if filename.endswith(".gz") else f"{filename}.gz")
+    if use_gzip:
+        fobj = gzip.open(out_path, 'wt', encoding='utf-8', newline='')
+    else:
+        fobj = open(out_path, 'w', newline='')
+    with fobj as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        
         for entry in history:
             writer.writerow({
                 "browser": entry["browser"],
                 "timestamp": entry["date_str"],
                 "title": entry["title"],
-                "url": entry["url"],
+                "url": maybe_anonymize(entry["url"], config),
                 "visit_count": entry["visit_count"]
             })
-    
-    print(f"History exported to {filename}")
+    print(f"History exported to {out_path}")
+    write_metadata_sidecar(filename, config, len(history))
+
+
+# --- Additional exporter functions ---
+def export_splunk(history: List[Dict], filename: str, config: Dict) -> None:
+    """Export as Splunk-friendly key=value log lines."""
+    exports = config.get("exports", {})
+    use_gzip = bool(exports.get("compress_output"))
+    out_path = filename if not use_gzip else (filename if filename.endswith(".gz") else f"{filename}.gz")
+    opener = (lambda p: gzip.open(p, 'wt', encoding='utf-8')) if use_gzip else (lambda p: open(p, 'w'))
+    with opener(out_path) as f:
+        for e in history:
+            line = (
+                f"time=\"{e['timestamp'].isoformat()}\" "
+                f"browser=\"{e['browser']}\" "
+                f"visit_count={e['visit_count']} "
+                f"domain=\"{extract_domain(e['url'])}\" "
+                f"url=\"{maybe_anonymize(e['url'], config)}\" "
+                f"title=\"{e['title'].replace('\"','\'')}\""
+            )
+            f.write(line + "\n")
+    print(f"Splunk log exported to {out_path}")
+    write_metadata_sidecar(filename, config, len(history))
+
+def export_elk(history: List[Dict], filename: str, config: Dict) -> None:
+    """Export as NDJSON suitable for Elastic/Logstash."""
+    exports = config.get("exports", {})
+    use_gzip = bool(exports.get("compress_output"))
+    out_path = filename if not use_gzip else (filename if filename.endswith(".gz") else f"{filename}.gz")
+    opener = (lambda p: gzip.open(p, 'wt', encoding='utf-8')) if use_gzip else (lambda p: open(p, 'w'))
+    with opener(out_path) as f:
+        for e in history:
+            doc = {
+                "@timestamp": e['timestamp'].isoformat(),
+                "browser": e['browser'],
+                "title": e['title'],
+                "url": maybe_anonymize(e['url'], config),
+                "visit_count": e['visit_count'],
+                "domain": extract_domain(e['url'])
+            }
+            f.write(json.dumps(doc) + "\n")
+    print(f"ELK NDJSON exported to {out_path}")
+    write_metadata_sidecar(filename, config, len(history))
+
+def export_gephi(history: List[Dict], filename: str, config: Dict) -> None:
+    """Export a simple domain-to-domain navigation graph in GEXF."""
+    # Build nodes (domains) and edges between consecutive visits
+    sorted_hist = sorted(history, key=lambda x: x['timestamp'])  # chronological
+    nodes: Dict[str, int] = {}
+    edges: Dict[tuple, int] = {}
+    node_id = 0
+    prev_domain = None
+    for e in sorted_hist:
+        d = extract_domain(e['url'])
+        if not d:
+            continue
+        if d not in nodes:
+            nodes[d] = node_id
+            node_id += 1
+        if prev_domain is not None and prev_domain != d:
+            key = (prev_domain, d)
+            edges[key] = edges.get(key, 0) + 1
+        prev_domain = d
+    # Write minimal GEXF
+    with open(filename, 'w') as f:
+        f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+        f.write('<gexf xmlns="http://www.gexf.net/1.3" version="1.3">\n')
+        f.write('  <graph mode="static" defaultedgetype="directed">\n')
+        f.write('    <nodes>\n')
+        for d, nid in nodes.items():
+            f.write(f'      <node id="{nid}" label="{d}"/>\n')
+        f.write('    </nodes>\n')
+        f.write('    <edges>\n')
+        eid = 0
+        for (src, dst), w in edges.items():
+            f.write(f'      <edge id="{eid}" source="{nodes[src]}" target="{nodes[dst]}" weight="{w}"/>\n')
+            eid += 1
+        f.write('    </edges>\n')
+        f.write('  </graph>\n')
+        f.write('</gexf>\n')
+    print(f"Gephi GEXF exported to {filename}")
+    write_metadata_sidecar(filename, config, len(history))
+
+def export_timeline_json(history: List[Dict], filename: str, config: Dict) -> None:
+    """Export a day-grouped timeline JSON for simple web UIs."""
+    grouped: Dict[str, List[Dict]] = defaultdict(list)
+    for e in history:
+        day = e['timestamp'].strftime('%Y-%m-%d')
+        grouped[day].append({
+            "time": e['timestamp'].strftime('%H:%M:%S'),
+            "browser": e['browser'],
+            "title": e['title'],
+            "url": maybe_anonymize(e['url'], config),
+            "visit_count": e['visit_count']
+        })
+    obj = {"days": grouped}
+    with open(filename, 'w') as f:
+        json.dump(obj, f, indent=2)
+    print(f"Timeline JSON exported to {filename}")
+    write_metadata_sidecar(filename, config, sum(len(v) for v in grouped.values()))
 
 
 def main():
@@ -1303,11 +1473,11 @@ def main():
     
     elif output_format == "json":
         filename = args.output or "browser_history.json"
-        export_json(filtered_history, filename)
-    
+        export_json(filtered_history, filename, config)
+
     elif output_format == "csv":
         filename = args.output or "browser_history.csv"
-        export_csv(filtered_history, filename)
+        export_csv(filtered_history, filename, config)
     
     elif output_format == "splunk":
         filename = args.output or "browser_history_splunk.log"
