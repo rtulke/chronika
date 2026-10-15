@@ -69,6 +69,18 @@ chmod +x chronika.py
 ./chronika.py --help
 ```
 
+### Proxy / Corporate Networks
+
+`setup_env.sh` and the generated `activate_env.sh` read proxy settings from the environment instead of hardcoding them. Either export them in your shell or keep them in a `.env` file next to the scripts (gitignored):
+
+```bash
+cp .env.example .env    # then set PROXY_URL and NO_PROXY_LIST
+./setup_env.sh
+source activate_env.sh  # applies PROXY_URL as http(s)_proxy / no_proxy
+```
+
+If `PROXY_URL` is unset, any existing `http_proxy`/`https_proxy` variables are left untouched.
+
 ### Basic Usage
 
 ```bash
