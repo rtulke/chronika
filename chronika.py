@@ -15,7 +15,7 @@ import argparse
 import toml
 from typing import List, Dict, Optional
 from collections import Counter, defaultdict
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 import tempfile
 import shutil
@@ -98,6 +98,53 @@ def extract_domain(url: str) -> str:
         return ""
 
 
+# Known search engines: (domain substring, query parameter, display label).
+# Order matters — more specific hosts (e.g. search.brave.com) must precede
+# broader ones. If the mapped parameter is missing, "q" is tried as fallback.
+SEARCH_ENGINES = [
+    ("google.", "q", "Google"),
+    ("bing.com", "q", "Bing"),
+    ("duckduckgo.com", "q", "DuckDuckGo"),
+    ("search.brave.com", "q", "Brave"),
+    ("search.yahoo.", "p", "Yahoo"),
+    ("ecosia.org", "q", "Ecosia"),
+    ("startpage.com", "query", "Startpage"),
+    ("qwant.com", "q", "Qwant"),
+    ("yandex.", "text", "Yandex"),
+    ("baidu.com", "wd", "Baidu"),
+    ("youtube.com", "search_query", "YouTube"),
+    ("amazon.", "k", "Amazon"),
+    ("github.com", "q", "GitHub"),
+    ("stackoverflow.com", "q", "Stack Overflow"),
+]
+
+
+def extract_search_query(url: str) -> Optional[Dict]:
+    """If the URL is a search-engine results page, return {engine, query}.
+
+    Ebene A: the query is already embedded in the visited URL (e.g. the
+    ?q=... parameter), so no extra database access is needed.
+    """
+    try:
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        if not domain:
+            return None
+        params = parse_qs(parsed.query)
+        for host_sub, param, label in SEARCH_ENGINES:
+            if host_sub in domain:
+                # Google's /url? links are outbound redirects, not searches
+                if label == "Google" and parsed.path.startswith("/url"):
+                    return None
+                values = params.get(param) or params.get("q")
+                if values and values[0].strip():
+                    return {"engine": label, "query": values[0].strip()}
+                return None
+        return None
+    except Exception:
+        return None
+
+
 def anonymize_url(url: str) -> str:
     """Anonymize URL for privacy"""
     try:
@@ -166,26 +213,47 @@ def get_chrome_history_path() -> Optional[Path]:
     return path if path and path.exists() else None
 
 
-def get_firefox_history_path() -> Optional[Path]:
-    """Get Firefox history database path"""
+def _find_places_databases(profile_dir: Path) -> List[Path]:
+    """Return every non-empty places.sqlite under a Mozilla-style profile dir.
+
+    Scans all profiles, not just ones whose folder name contains "default",
+    so custom-named profiles (e.g. "Profil 1") are included. Ordered
+    largest-first so the profile holding the most history is read first.
+    """
+    if not profile_dir.exists():
+        return []
+
+    def _size(p: Path) -> int:
+        try:
+            return p.stat().st_size
+        except Exception:
+            return 0
+
+    dbs = []
+    for profile in profile_dir.iterdir():
+        try:
+            if not profile.is_dir():
+                continue
+            history_path = profile / "places.sqlite"
+            if history_path.exists() and _size(history_path) > 0:
+                dbs.append(history_path)
+        except Exception:
+            continue
+    dbs.sort(key=_size, reverse=True)
+    return dbs
+
+
+def get_firefox_history_path() -> List[Path]:
+    """Get Firefox history database paths (all profiles with data)"""
     system = os.uname().sysname
     home = Path.home()
-    
+
     if system == "Darwin":
         profile_dir = home / "Library/Application Support/Firefox/Profiles"
     else:
         profile_dir = home / ".mozilla/firefox"
-    
-    if not profile_dir.exists():
-        return None
-    
-    # Find default profile
-    for profile in profile_dir.iterdir():
-        if profile.is_dir() and "default" in profile.name.lower():
-            history_path = profile / "places.sqlite"
-            if history_path.exists():
-                return history_path
-    return None
+
+    return _find_places_databases(profile_dir)
 
 
 def get_safari_history_path() -> Optional[Path]:
@@ -270,28 +338,22 @@ def get_vivaldi_history_path() -> Optional[Path]:
     return path if path and path.exists() else None
 
 
-def get_tor_history_path() -> Optional[Path]:
-    """Get Tor Browser history database path"""
+def get_tor_history_path() -> List[Path]:
+    """Get Tor Browser history database paths (all profiles with data)"""
     system = os.uname().sysname
     home = Path.home()
-    
+
     # Tor Browser uses different paths and profile naming
     if system == "Darwin":
         tor_dir = home / "Library/Application Support/TorBrowser-Data/Browser"
     else:
         tor_dir = home / ".tor-browser/app/Browser/TorBrowser/Data/Browser"
-    
+
     if not tor_dir.exists():
         # Alternative Linux path
         tor_dir = home / "Desktop/tor-browser_en-US/Browser/TorBrowser/Data/Browser"
-    
-    if tor_dir.exists():
-        for profile in tor_dir.iterdir():
-            if profile.is_dir() and profile.name.endswith(".default"):
-                history_path = profile / "places.sqlite"
-                if history_path.exists():
-                    return history_path
-    return None
+
+    return _find_places_databases(tor_dir)
 
 
 def get_chromium_history_path() -> Optional[Path]:
@@ -308,26 +370,17 @@ def get_chromium_history_path() -> Optional[Path]:
     return path if path and path.exists() else None
 
 
-def get_librewolf_history_path() -> Optional[Path]:
-    """Get LibreWolf history database path"""
+def get_librewolf_history_path() -> List[Path]:
+    """Get LibreWolf history database paths (all profiles with data)"""
     system = os.uname().sysname
     home = Path.home()
-    
+
     if system == "Darwin":
         profile_dir = home / "Library/Application Support/LibreWolf/Profiles"
     else:
         profile_dir = home / ".librewolf"
-    
-    if not profile_dir.exists():
-        return None
-    
-    # Find default profile
-    for profile in profile_dir.iterdir():
-        if profile.is_dir() and "default" in profile.name.lower():
-            history_path = profile / "places.sqlite"
-            if history_path.exists():
-                return history_path
-    return None
+
+    return _find_places_databases(profile_dir)
 
 
 def extract_chromium_based_history(db_path: Path, days_back: int, limit: int, browser_name: str, debug: bool = False, no_time_filter: bool = False) -> List[Dict]:
@@ -424,6 +477,79 @@ def extract_chromium_based_history(db_path: Path, days_back: int, limit: int, br
     return history_entries
 
 
+def extract_chromium_search_terms(db_path: Path, days_back: int, limit: int, browser_name: str, debug: bool = False, no_time_filter: bool = False) -> List[Dict]:
+    """Ebene B: read typed search terms from a Chromium keyword_search_terms table."""
+    results = []
+    chrome_epoch = datetime(1601, 1, 1)
+    if not no_time_filter:
+        cutoff_time = datetime.now() - timedelta(days=days_back)
+        cutoff = int((cutoff_time - chrome_epoch).total_seconds() * 1000000)
+    else:
+        cutoff = 0
+
+    temp_db = None
+    try:
+        temp_db = copy_db_to_temp(db_path, browser_name + "_kst")
+        conn = sqlite3.connect(str(temp_db))
+        cursor = conn.cursor()
+
+        # Table is absent on very old / empty profiles
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='keyword_search_terms'")
+        if not cursor.fetchone():
+            conn.close()
+            return results
+
+        if no_time_filter:
+            query = """
+            SELECT kst.term, u.url, u.last_visit_time
+            FROM keyword_search_terms kst
+            JOIN urls u ON u.id = kst.url_id
+            ORDER BY u.last_visit_time DESC
+            LIMIT ?
+            """
+            cursor.execute(query, (limit,))
+        else:
+            query = """
+            SELECT kst.term, u.url, u.last_visit_time
+            FROM keyword_search_terms kst
+            JOIN urls u ON u.id = kst.url_id
+            WHERE u.last_visit_time > ?
+            ORDER BY u.last_visit_time DESC
+            LIMIT ?
+            """
+            cursor.execute(query, (cutoff, limit))
+
+        rows = cursor.fetchall()
+        if debug:
+            print(f"   🔎 {browser_name} keyword_search_terms: {len(rows)} rows")
+
+        for term, url, last_visit_time in rows:
+            if not term or not last_visit_time:
+                continue
+            ts = chrome_epoch + timedelta(microseconds=last_visit_time)
+            info = extract_search_query(url or "")
+            engine = info["engine"] if info else "Search"
+            results.append({
+                "browser": browser_name,
+                "source": "keyword_search_terms",
+                "engine": engine,
+                "query": term,
+                "url": url or "",
+                "timestamp": ts,
+            })
+        conn.close()
+    except Exception as e:
+        if debug:
+            print(f"❌ Error reading {browser_name} search terms: {e}")
+    finally:
+        try:
+            if temp_db and Path(temp_db).exists():
+                Path(temp_db).unlink()
+        except Exception:
+            pass
+    return results
+
+
 def extract_firefox_based_history(db_path: Path, days_back: int, limit: int, browser_name: str, debug: bool = False, no_time_filter: bool = False) -> List[Dict]:
     """Extract history from Firefox-based browsers (Firefox, Tor Browser, LibreWolf)"""
     history_entries = []
@@ -514,6 +640,83 @@ def extract_firefox_based_history(db_path: Path, days_back: int, limit: int, bro
             print(f"Error reading {browser_name} history: {e}")
     
     return history_entries
+
+
+def extract_firefox_search_terms(places_path: Path, days_back: int, limit: int, browser_name: str, debug: bool = False, no_time_filter: bool = False) -> List[Dict]:
+    """Ebene B: read search-bar terms from the sibling formhistory.sqlite.
+
+    Firefox stores search-bar input in formhistory.sqlite (a separate file
+    next to places.sqlite), under fieldname 'searchbar-history'.
+    """
+    results = []
+    form_path = Path(places_path).parent / "formhistory.sqlite"
+    if not form_path.exists():
+        if debug:
+            print(f"   🔎 {browser_name}: no formhistory.sqlite next to {places_path.name}")
+        return results
+
+    if not no_time_filter:
+        cutoff = int((datetime.now() - timedelta(days=days_back)).timestamp() * 1000000)
+    else:
+        cutoff = 0
+
+    temp_db = None
+    try:
+        temp_db = copy_db_to_temp(form_path, browser_name + "_form")
+        conn = sqlite3.connect(str(temp_db))
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='moz_formhistory'")
+        if not cursor.fetchone():
+            conn.close()
+            return results
+
+        if no_time_filter:
+            query = """
+            SELECT value, lastUsed
+            FROM moz_formhistory
+            WHERE fieldname = 'searchbar-history'
+            ORDER BY lastUsed DESC
+            LIMIT ?
+            """
+            cursor.execute(query, (limit,))
+        else:
+            query = """
+            SELECT value, lastUsed
+            FROM moz_formhistory
+            WHERE fieldname = 'searchbar-history' AND lastUsed > ?
+            ORDER BY lastUsed DESC
+            LIMIT ?
+            """
+            cursor.execute(query, (cutoff, limit))
+
+        rows = cursor.fetchall()
+        if debug:
+            print(f"   🔎 {browser_name} searchbar-history: {len(rows)} rows")
+
+        for value, last_used in rows:
+            if not value or not last_used:
+                continue
+            ts = datetime.fromtimestamp(last_used / 1000000)
+            results.append({
+                "browser": browser_name,
+                "source": "searchbar",
+                "engine": "Searchbar",
+                "query": value,
+                "url": "",
+                "timestamp": ts,
+            })
+        conn.close()
+    except Exception as e:
+        if debug:
+            print(f"❌ Error reading {browser_name} search terms: {e}")
+    finally:
+        try:
+            if temp_db and Path(temp_db).exists():
+                Path(temp_db).unlink()
+        except Exception:
+            pass
+    return results
 
 
 def extract_safari_history(db_path: Path, days_back: int, limit: int, debug: bool = False) -> List[Dict]:
@@ -891,19 +1094,83 @@ def collect_browser_history(config: Dict, debug: bool = False, search_all: bool 
     
     for browser_name, (path_func, extract_func) in browsers.items():
         if config["browsers"].get(browser_name, False):
-            db_path = path_func()
-            if db_path:
+            db_paths = path_func()
+            # Normalize to a list so browsers with multiple profiles are merged
+            if db_paths is None:
+                db_paths = []
+            elif isinstance(db_paths, (str, Path)):
+                db_paths = [db_paths]
+            if db_paths:
                 print(f"Reading {browser_name.title()} history...")
-                history = extract_func(db_path, days_back, db_limit)
-                all_history.extend(history)
+                for db_path in db_paths:
+                    history = extract_func(db_path, days_back, db_limit)
+                    all_history.extend(history)
             else:
                 if debug:
                     print(f"🔍 {browser_name.title()} history not found (path detection failed)")
                 else:
                     print(f"{browser_name.title()} history not found")
     
+    # Annotate each entry with a decoded search query (Ebene A) if the URL
+    # is a search-engine results page. None otherwise.
+    for entry in all_history:
+        info = extract_search_query(entry.get("url", ""))
+        if info:
+            entry["search_engine"] = info["engine"]
+            entry["search_query"] = info["query"]
+        else:
+            entry["search_engine"] = None
+            entry["search_query"] = None
+
     # Sort by timestamp (newest first)
     return sorted(all_history, key=lambda x: x["timestamp"], reverse=True)
+
+
+def collect_search_terms(config: Dict, debug: bool = False, search_all: bool = False, no_time_filter: bool = False) -> List[Dict]:
+    """Ebene B: collect typed search terms from dedicated browser tables."""
+    results = []
+    days_back = config["output"]["days_back"]
+
+    if search_all or no_time_filter:
+        db_limit = 999999
+    else:
+        db_limit = max(config["output"]["limit"] * 10, 1000)
+
+    # Chromium path functions return a single path; Firefox family return a list
+    chromium_browsers = {
+        "chrome": (get_chrome_history_path, "Chrome"),
+        "brave": (get_brave_history_path, "Brave"),
+        "opera": (get_opera_history_path, "Opera"),
+        "edge": (get_edge_history_path, "Edge"),
+        "vivaldi": (get_vivaldi_history_path, "Vivaldi"),
+        "chromium": (get_chromium_history_path, "Chromium"),
+    }
+    firefox_browsers = {
+        "firefox": (get_firefox_history_path, "Firefox"),
+        "tor": (get_tor_history_path, "Tor Browser"),
+        "librewolf": (get_librewolf_history_path, "LibreWolf"),
+    }
+
+    for name, (path_func, label) in chromium_browsers.items():
+        if not config["browsers"].get(name, False):
+            continue
+        path = path_func()
+        if not path:
+            continue
+        results.extend(extract_chromium_search_terms(path, days_back, db_limit, label, debug, no_time_filter))
+
+    for name, (path_func, label) in firefox_browsers.items():
+        if not config["browsers"].get(name, False):
+            continue
+        paths = path_func()
+        if not paths:
+            continue
+        if isinstance(paths, (str, Path)):
+            paths = [paths]
+        for p in paths:
+            results.extend(extract_firefox_search_terms(p, days_back, db_limit, label, debug, no_time_filter))
+
+    return results
 
 
 def display_timeline(history: List[Dict], config: Dict) -> None:
@@ -953,6 +1220,56 @@ def display_timeline(history: List[Dict], config: Dict) -> None:
             print(f"    👁️  Visited {entry['visit_count']} times")
         
         print()
+
+
+def display_searches(searches: List[Dict], config: Dict, search_all: bool = False) -> None:
+    """Display extracted search queries grouped by day."""
+    # Deduplicate: same browser + query + url counts once (removes the overlap
+    # between Ebene A URL decoding and Ebene B keyword_search_terms).
+    seen = set()
+    unique = []
+    for s in searches:
+        key = (s["browser"], s["query"].strip().lower(), s.get("url", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(s)
+
+    unique.sort(key=lambda x: x["timestamp"], reverse=True)
+
+    if not unique:
+        print("No search queries found")
+        return
+
+    display_limit = config["output"]["limit"]
+    if not search_all and len(unique) > display_limit:
+        print(f"Found {len(unique)} searches, showing {display_limit} (use --all for everything)")
+        unique = unique[:display_limit]
+
+    print("\n" + "="*80)
+    print(f"SEARCH QUERIES ({len(unique)})")
+    print("="*80)
+
+    engine_icons = {
+        "Google": "🔍", "Bing": "🔎", "DuckDuckGo": "🦆", "YouTube": "▶️",
+        "Yahoo": "🅨", "Yandex": "🔴", "Baidu": "🅱", "Amazon": "📦",
+        "Ecosia": "🌱", "Startpage": "🧭", "Qwant": "🐧", "Brave": "🦁",
+        "GitHub": "🐙", "Stack Overflow": "📚", "Searchbar": "⌨️", "Search": "🔎",
+    }
+
+    current_date = None
+    for s in unique:
+        day = s["timestamp"].strftime("%Y-%m-%d")
+        if current_date != day:
+            current_date = day
+            print(f"\n📅 {current_date}")
+            print("-" * 40)
+        t = s["timestamp"].strftime("%H:%M:%S")
+        engine = s.get("engine") or s.get("source", "")
+        icon = engine_icons.get(engine, "🔎")
+        print(f"  {t} {icon} [{engine}] ({s['browser']})")
+        print(f"    🔎 {s['query'][:100]}")
+    print()
 
 
 def display_top_domains(history: List[Dict], config: Dict) -> None:
@@ -1312,7 +1629,7 @@ def main():
     # Output options
     parser.add_argument("--format", choices=[
         "timeline", "json", "csv", "stats", "top-domains", "browser-usage", "patterns",
-        "splunk", "elk", "gephi", "timeline-json"
+        "searches", "splunk", "elk", "gephi", "timeline-json"
     ], help="Output format")
     
     # Time options
@@ -1334,7 +1651,7 @@ def main():
     
     # Output options
     parser.add_argument("--limit", type=int, help="Max entries to show")
-    parser.add_argument("--all", action="store_true", help="Search entire database (ignore limit)")
+    parser.add_argument("--all", action="store_true", help="Search entire database (ignore limit and time window)")
     parser.add_argument("--no-time-filter", action="store_true", help="Disable time filtering (search all history)")
     parser.add_argument("--output", help="Output filename")
     parser.add_argument("--anonymize", action="store_true", help="Anonymize URLs in output")
@@ -1421,7 +1738,9 @@ def main():
     
     # Search mode
     search_all = args.all
-    no_time_filter = args.no_time_filter
+    # --all is meant to show the entire database, so it also disables the
+    # time window (not just the row limit).
+    no_time_filter = args.no_time_filter or args.all
     
     if search_all:
         print("🔍 Searching entire database")
@@ -1470,6 +1789,22 @@ def main():
     
     elif output_format == "patterns":
         display_patterns(filtered_history, config)
+
+    elif output_format == "searches":
+        # Ebene B: typed search terms from dedicated tables
+        searches = collect_search_terms(config, debug_mode, search_all, no_time_filter)
+        # Ebene A: searches decoded from the visited URLs already collected
+        for entry in history:
+            if entry.get("search_query"):
+                searches.append({
+                    "browser": entry["browser"],
+                    "source": "url",
+                    "engine": entry.get("search_engine") or "",
+                    "query": entry["search_query"],
+                    "url": entry.get("url", ""),
+                    "timestamp": entry["timestamp"],
+                })
+        display_searches(searches, config, search_all)
     
     elif output_format == "json":
         filename = args.output or "browser_history.json"
