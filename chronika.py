@@ -9,6 +9,7 @@ import json
 import csv
 import os
 import re
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 import argparse
@@ -44,7 +45,8 @@ DEFAULT_CONFIG = {
     "display": {
         "show_url": True,
         "show_visit_count": True,
-        "date_format": "%Y-%m-%d %H:%M:%S"
+        "date_format": "%Y-%m-%d %H:%M:%S",
+        "use_emoji": True
     },
     "filters": {
         "domain_whitelist": [],
@@ -87,6 +89,53 @@ def create_default_config(config_path: str = "browser_history.toml") -> None:
     with open(config_path, 'w') as f:
         toml.dump(DEFAULT_CONFIG, f)
     print(f"Created default config: {config_path}")
+
+
+# --- Emoji handling ---------------------------------------------------------
+# Decorative icons are printed as literals all over this module. Rather than
+# threading a flag through every print call, --no-emoji (or display.use_emoji
+# = false) installs a proxy on sys.stdout/stderr that strips emoji sequences,
+# plus the spacing that followed them, from everything written to the
+# terminal. File exports are unaffected. Box-drawing characters (█ │ ═ ─) and
+# plain arrows (→) are deliberately not matched.
+_EMOJI_RE = re.compile(
+    "(?:"
+    "[\U0001F000-\U0001FAFF]"   # pictographs, emoticons, enclosed alnum (SMP)
+    "|[\u2300-\u23FF]"          # misc technical: ⌨ ⏰ …
+    "|[\u2600-\u27BF]"          # misc symbols & dingbats: ⚙ ✅ ❌ …
+    "|[\u2B00-\u2BFF]"          # misc symbols & arrows: ⭐ …
+    "|[\u25B6\u25C0]"           # ▶ ◀
+    ")"
+    "[\uFE0F\u200D\u20E3\U0001F000-\U0001FAFF]*"  # VS16, ZWJ, keycap, joined parts
+    "[ \t]*"                     # swallow the spacing that followed the icon
+    "|[\uFE0F\u200D\u20E3]"     # stray modifiers
+)
+
+
+def strip_emoji(text: str) -> str:
+    """Remove emoji sequences (and the whitespace right after them)."""
+    return _EMOJI_RE.sub("", text)
+
+
+class _EmojiStrippingStream:
+    """Thin proxy around a text stream that strips emoji on write()."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text):
+        return self._stream.write(strip_emoji(text))
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def disable_emoji_output() -> None:
+    """Route stdout and stderr through the emoji-stripping proxy (idempotent)."""
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name)
+        if not isinstance(stream, _EmojiStrippingStream):
+            setattr(sys, name, _EmojiStrippingStream(stream))
 
 
 def extract_domain(url: str) -> str:
@@ -1655,6 +1704,7 @@ def main():
     parser.add_argument("--no-time-filter", action="store_true", help="Disable time filtering (search all history)")
     parser.add_argument("--output", help="Output filename")
     parser.add_argument("--anonymize", action="store_true", help="Anonymize URLs in output")
+    parser.add_argument("--no-emoji", action="store_true", help="Plain text output without emoji icons")
     
     # Analytics options
     parser.add_argument("--group-by", choices=["hour", "day", "weekday", "month"], 
@@ -1669,6 +1719,12 @@ def main():
     
     # Load configuration
     config = load_config(args.config)
+
+    # Emoji toggle: must be installed before the first decorated print
+    if args.no_emoji:
+        config.setdefault("display", {})["use_emoji"] = False
+    if not config.get("display", {}).get("use_emoji", True):
+        disable_emoji_output()
     
     # Browser selection override
     if args.browsers:

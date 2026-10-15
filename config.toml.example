@@ -34,6 +34,9 @@ show_visit_count = true
 # Date format for display
 date_format = "%Y-%m-%d %H:%M:%S"
 
+# Decorative emoji icons in terminal output (--no-emoji overrides this)
+use_emoji = true
+
 [filters]
 # Domain filtering (leave empty to include all)
 domain_whitelist = []  # Example: ["github.com", "stackoverflow.com"]

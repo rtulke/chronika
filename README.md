@@ -146,6 +146,7 @@ If `PROXY_URL` is unset, any existing `http_proxy`/`https_proxy` variables are l
 | `--debug` | Enable debug output | Troubleshooting, analysis |
 | `--output FILE` | Specify output filename | `--output analysis.json` |
 | `--anonymize` | Anonymize URLs for privacy | Safe data sharing |
+| `--no-emoji` | Plain text output without emoji icons | Logs, reports, terminals without emoji fonts |
 
 ### Analytics Options
 | Parameter | Description | Example |
@@ -276,6 +277,7 @@ days_back = 7
 show_url = true
 show_visit_count = true
 date_format = "%Y-%m-%d %H:%M:%S"
+use_emoji = true                # false = plain text, same as --no-emoji
 
 [filters]
 domain_whitelist = []           # Example: ["github.com", "stackoverflow.com"]
